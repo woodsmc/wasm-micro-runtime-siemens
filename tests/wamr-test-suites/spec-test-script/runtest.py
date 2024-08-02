@@ -833,6 +833,12 @@ def test_assert_return(r, opts, form):
         if ' ' in func:
             func = func.replace(' ', '\\')
 
+        # Note: 'as-memory.grow-first' doesn't actually grow memory.
+        # (thus not in this list)
+        if opts.qemu and opts.target == 'xtensa' and func in {'as-memory.grow-value', 'as-memory.grow-size', 'as-memory.grow-last', 'as-memory.grow-everywhere'}:
+            log("ignoring memory.grow test")
+            return
+
         if m.group(2) == '':
             args = []
         else:
@@ -1118,6 +1124,10 @@ def compile_wasm_to_aot(wasm_tempfile, aot_tempfile, runner, opts, r, output = '
         cmd.append("--enable-indirect-mode")
         cmd.append("--disable-llvm-intrinsics")
 
+        # avoid l32r relocations for xtensa
+        if opts.target == "xtensa":
+            cmd.append("--mllvm=-mtext-section-literals")
+
     if opts.multi_thread:
         cmd.append("--enable-multi-thread")
 
@@ -1170,7 +1180,13 @@ def run_wasm_with_repl(wasm_tempfile, aot_tempfile, opts, r):
         # cf. https://github.com/bytecodealliance/wasm-micro-runtime/issues/2231
         cmd_iwasm.append("--stack-size=10485760")  # 10MB (!)
     else:
-        cmd_iwasm.append("--stack-size=131072")  # 128KB
+        if opts.aot:
+            # Note: aot w/o gc doesn't require the interpreter stack at all.
+            # Note: 1 is the minimum value we can specify because 0 means
+            # the default.
+            cmd_iwasm.append("--stack-size=1")
+        else:
+            cmd_iwasm.append("--stack-size=131072")  # 128KB
     if opts.verbose:
         cmd_iwasm.append("-v=5")
     cmd_iwasm.append(tmpfile)
