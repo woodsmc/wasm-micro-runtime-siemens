@@ -74,6 +74,11 @@ jobs:
             target: "riscv32",
             fpu_type: "none"
           },
+          {
+            config: "boards/risc-v/qemu-rv/rv-virt/configs/nsh",
+            target: "riscv32_ilp32f",
+            fpu_type: "fp"
+          },
           # {
           #   config: "boards/risc-v/qemu-rv/rv-virt/configs/nsh",
           #   target: "riscv32_ilp32d",
@@ -120,6 +125,10 @@ jobs:
           - target_config: { config: "boards/risc-v/qemu-rv/rv-virt/configs/nsh64" }
             wamr_test_option: { mode: "-t aot -X" }
 
+          # XIP is not fully supported yet on RISCV32 ILP32F, some relocations can not be resolved
+          - target_config: { config: "boards/risc-v/qemu-rv/rv-virt/configs/nsh", fpu_type: "fp" }
+            wamr_test_option:  { mode: "-t aot -X" }
+
           # Our xtensa environment doesn't have enough memory
           - target_config: { target: "xtensa" }
             wamr_feature_option: { mode: "-G" }
@@ -131,14 +140,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: apache/nuttx
-          ref: ${{ matrix.target_config.target == 'xtensa' && '985d395b025cf2012b22f6bb4461959fa6d87645' || 'releases/12.4' }}
+          ref: ${{ matrix.target_config.target == 'xtensa' && '985d395b025cf2012b22f6bb4461959fa6d87645' || 'releases/12.6' }}
           path: nuttx
 
       - name: Checkout NuttX Apps
         uses: actions/checkout@v4
         with:
           repository: apache/nuttx-apps
-          ref: ${{ matrix.target_config.target == 'xtensa' && '2ef3eb25c0cec944b13792185f7e5d5a05990d5f' || 'releases/12.4' }}
+          ref: ${{ matrix.target_config.target == 'xtensa' && '2ef3eb25c0cec944b13792185f7e5d5a05990d5f' || 'releases/12.6' }}
           path: apps
 
       - name: Checkout WAMR
@@ -247,7 +256,7 @@ jobs:
         run: |
           kconfig-tweak --set-val CONFIG_INTERPRETERS_WAMR_STACKSIZE 25600
         working-directory: nuttx
-      
+
       - name: Enable WAMR interpreter/aot runtime for NuttX
         if: matrix.wamr_test_option.option != ''
         run: |
@@ -310,7 +319,7 @@ jobs:
         id: build_firmware_path
         run: |
           echo "firmware=$PWD/nuttx/nuttx" >> $GITHUB_OUTPUT
-      
+
       # for xtensa, use the espressif fork of qemu, which has esp32s3 support.
       - name: Install QEMU (xtensa)
         if: matrix.target_config.target == 'xtensa'

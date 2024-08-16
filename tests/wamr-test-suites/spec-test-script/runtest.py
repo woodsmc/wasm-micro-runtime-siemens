@@ -62,6 +62,12 @@ aot_target_options_map = {
     "xtensa": ["--target=xtensa"],
 }
 
+# AOT compilation options mapping for XIP mode
+aot_target_options_map_xip = {
+    # avoid l32r relocations for xtensa
+    "xtensa": ["--mllvm=-mtext-section-literals"]
+}
+
 def debug(data):
     if debug_file:
         debug_file.write(data)
@@ -1121,12 +1127,9 @@ def compile_wasm_to_aot(wasm_tempfile, aot_tempfile, runner, opts, r, output = '
         cmd.append("--disable-simd")
 
     if opts.xip:
-        cmd.append("--enable-indirect-mode")
-        cmd.append("--disable-llvm-intrinsics")
-
-        # avoid l32r relocations for xtensa
-        if opts.target == "xtensa":
-            cmd.append("--mllvm=-mtext-section-literals")
+        cmd.append("--xip")
+        if test_target in aot_target_options_map_xip:
+            cmd += aot_target_options_map_xip[test_target]
 
     if opts.multi_thread:
         cmd.append("--enable-multi-thread")
@@ -1308,6 +1311,12 @@ if __name__ == "__main__":
     wasm_tempfile = create_tmp_file(".wasm")
     if test_aot:
         aot_tempfile = create_tmp_file(".aot")
+        # could be potientially compiled to aot
+        # with the future following call test_assert_xxx,
+        # add them to temp_file_repo now even if no actual following file,
+        # it will be simple ignore during final deletion if not exist
+        prefix = wasm_tempfile.split(".wasm")[0]
+        temp_file_repo.append(prefix + ".aot")
 
     ret_code = 0
     try:
@@ -1430,6 +1439,12 @@ if __name__ == "__main__":
 
                         if test_aot:
                             r = compile_wasm_to_aot(temp_files[1], temp_files[2], True, opts, r)
+                            # could be potientially compiled to aot
+                            # with the future following call test_assert_xxx,
+                            # add them to temp_file_repo now even if no actual following file,
+                            # it will be simple ignore during final deletion if not exist
+                            prefix = temp_files[1].split(".wasm")[0]
+                            temp_file_repo.append(prefix + ".aot")
                             try:
                                 assert_prompt(r, ['Compile success'], opts.start_timeout, False)
                             except:
