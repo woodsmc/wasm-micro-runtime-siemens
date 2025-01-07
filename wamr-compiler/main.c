@@ -167,7 +167,7 @@ print_help()
     printf("                            By default, all features are enabled. To disable all features,\n");
     printf("                            provide an empty list (i.e. --call-stack-features=). This flag\n");
     printf("                            only only takes effect when --enable-dump-call-stack is set.\n");
-    printf("                            Available features: bounds-checks, ip, trap-ip, values.\n");
+    printf("                            Available features: bounds-checks, ip, func-idx, trap-ip, values.\n");
     printf("  --enable-perf-profiling   Enable function performance profiling\n");
     printf("  --enable-memory-profiling Enable memory usage profiling\n");
     printf("  --xip                     A shorthand of --enable-indirect-mode --disable-llvm-intrinsics\n");
@@ -206,6 +206,7 @@ print_help()
     printf("  --enable-linux-perf       Enable linux perf support\n");
 #endif
     printf("  --mllvm=<option>          Add the LLVM command line option\n");
+    printf("  --enable-shared-heap      Enable shared heap feature\n");
     printf("  -v=n                      Set log verbose level (0 to 5, default is 2), larger with more log\n");
     printf("  --version                 Show version information\n");
     printf("Examples: wamrc -o test.aot test.wasm\n");
@@ -295,6 +296,9 @@ parse_call_stack_features(char *features_str,
         else if (!strcmp(features[size], "values")) {
             out_features->values = true;
         }
+        else if (!strcmp(features[size], "func-idx")) {
+            out_features->func_idx = true;
+        }
         else {
             ret = false;
             printf("Unsupported feature %s\n", features[size]);
@@ -305,6 +309,13 @@ parse_call_stack_features(char *features_str,
 finish:
     free(features);
     return ret;
+}
+
+static bool
+can_enable_tiny_frame(const AOTCompOption *opt)
+{
+    return !opt->call_stack_features.values && !opt->enable_gc
+           && !opt->enable_perf_profiling;
 }
 
 static uint32
@@ -403,9 +414,7 @@ main(int argc, char *argv[])
     option.enable_bulk_memory = true;
     option.enable_ref_types = true;
     option.enable_gc = false;
-
-    /* Set all the features to true by default */
-    memset(&option.call_stack_features, 1, sizeof(AOTCallStackFeatures));
+    aot_call_stack_features_init_default(&option.call_stack_features);
 
     /* Process options */
     for (argc--, argv++; argc > 0 && argv[0][0] == '-'; argc--, argv++) {
@@ -519,7 +528,7 @@ main(int argc, char *argv[])
             option.enable_aux_stack_check = false;
         }
         else if (!strcmp(argv[0], "--enable-dump-call-stack")) {
-            option.enable_aux_stack_frame = true;
+            option.aux_stack_frame_type = AOT_STACK_FRAME_TYPE_STANDARD;
         }
         else if (!strncmp(argv[0], "--call-stack-features=", 22)) {
             /* Reset all the features, only enable the user-defined ones */
@@ -535,7 +544,7 @@ main(int argc, char *argv[])
             }
         }
         else if (!strcmp(argv[0], "--enable-perf-profiling")) {
-            option.enable_aux_stack_frame = true;
+            option.aux_stack_frame_type = AOT_STACK_FRAME_TYPE_STANDARD;
             option.enable_perf_profiling = true;
         }
         else if (!strcmp(argv[0], "--enable-memory-profiling")) {
@@ -550,7 +559,7 @@ main(int argc, char *argv[])
             option.is_indirect_mode = true;
         }
         else if (!strcmp(argv[0], "--enable-gc")) {
-            option.enable_aux_stack_frame = true;
+            option.aux_stack_frame_type = AOT_STACK_FRAME_TYPE_STANDARD;
             option.enable_gc = true;
         }
         else if (!strcmp(argv[0], "--disable-llvm-intrinsics")) {
@@ -639,6 +648,9 @@ main(int argc, char *argv[])
                 llvm_options[llvm_options_count - 2] = "wamrc";
             llvm_options[llvm_options_count - 1] = argv[0] + 8;
         }
+        else if (!strcmp(argv[0], "--enable-shared-heap")) {
+            option.enable_shared_heap = true;
+        }
         else if (!strcmp(argv[0], "--version")) {
             uint32 major, minor, patch;
             wasm_runtime_get_version(&major, &minor, &patch);
@@ -651,6 +663,20 @@ main(int argc, char *argv[])
 
     if (!use_dummy_wasm && (argc == 0 || !out_file_name))
         PRINT_HELP_AND_EXIT();
+
+    if (option.aux_stack_frame_type == AOT_STACK_FRAME_TYPE_STANDARD
+        && can_enable_tiny_frame(&option)) {
+        LOG_VERBOSE("Use tiny frame mode for stack frames");
+        option.aux_stack_frame_type = AOT_STACK_FRAME_TYPE_TINY;
+        /* for now we only enable frame per function for a TINY frame mode */
+        option.call_stack_features.frame_per_function = true;
+    }
+    if (!option.call_stack_features.func_idx
+        && (option.enable_gc || option.enable_perf_profiling)) {
+        LOG_WARNING("'func-idx' call stack feature will be automatically "
+                    "enabled for GC and perf profiling mode");
+        option.call_stack_features.func_idx = true;
+    }
 
     if (!size_level_set) {
         /**

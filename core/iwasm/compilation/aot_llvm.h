@@ -37,6 +37,18 @@
 #include "aot_orc_extra.h"
 #include "aot_comp_option.h"
 
+#if defined(_WIN32) || defined(_WIN32_)
+#include <io.h>
+#define access _access
+/* On windows there is no X_OK flag to check for executablity, only check for
+ * existence */
+#ifdef X_OK
+#undef X_OK
+#endif
+#define X_OK 00
+#define unlink _unlink
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -242,6 +254,9 @@ typedef struct AOTFuncContext {
     bool mem_space_unchanged;
     AOTCheckedAddrList checked_addr_list;
 
+    LLVMValueRef shared_heap_base_addr_adj;
+    LLVMValueRef shared_heap_start_off;
+
     LLVMBasicBlockRef got_exception_block;
     LLVMBasicBlockRef func_return_block;
     LLVMValueRef exception_id_phi;
@@ -410,7 +425,7 @@ typedef struct AOTCompContext {
     bool enable_aux_stack_check;
 
     /* Generate auxiliary stack frame */
-    bool enable_aux_stack_frame;
+    AOTStackFrameType aux_stack_frame_type;
 
     /* Auxiliary call stack features */
     AOTCallStackFeatures call_stack_features;
@@ -466,6 +481,8 @@ typedef struct AOTCompContext {
 
     /* Enable GC */
     bool enable_gc;
+
+    bool enable_shared_heap;
 
     uint32 opt_level;
     uint32 size_level;

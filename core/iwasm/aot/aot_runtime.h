@@ -25,12 +25,16 @@ extern "C" {
 #define WASM_FEATURE_REF_TYPES (1 << 3)
 #define WASM_FEATURE_GARBAGE_COLLECTION (1 << 4)
 #define WASM_FEATURE_EXCEPTION_HANDLING (1 << 5)
-#define WASM_FEATURE_MEMORY64 (1 << 6)
+#define WASM_FEATURE_TINY_STACK_FRAME (1 << 6)
 #define WASM_FEATURE_MULTI_MEMORY (1 << 7)
 #define WASM_FEATURE_DYNAMIC_LINKING (1 << 8)
 #define WASM_FEATURE_COMPONENT_MODEL (1 << 9)
 #define WASM_FEATURE_RELAXED_SIMD (1 << 10)
 #define WASM_FEATURE_FLEXIBLE_VECTORS (1 << 11)
+/* Stack frame is created at the beginning of the function,
+ * and not at the beginning of each function call */
+#define WASM_FEATURE_FRAME_PER_FUNCTION (1 << 12)
+#define WASM_FEATURE_FRAME_NO_FUNC_IDX (1 << 13)
 
 typedef enum AOTSectionType {
     AOT_SECTION_TYPE_TARGET_INFO = 0,
@@ -105,15 +109,41 @@ typedef struct AOTFunctionInstance {
     } u;
 } AOTFunctionInstance;
 
+/* Map of a function index to the element ith in
+   the export functions array */
+typedef struct ExportFuncMap {
+    uint32 func_idx;
+    uint32 export_idx;
+} ExportFuncMap;
+
 typedef struct AOTModuleInstanceExtra {
     DefPointer(const uint32 *, stack_sizes);
+    /*
+     * Adjusted shared heap based addr to simple the calculation
+     * in the aot code. The value is:
+     *   shared_heap->base_addr - shared_heap->start_off
+     */
+    DefPointer(uint8 *, shared_heap_base_addr_adj);
+    MemBound shared_heap_start_off;
+
     WASMModuleInstanceExtraCommon common;
+
+    /**
+     * maps of func indexes to export func indexes, which
+     * is sorted by func index for a quick lookup and is
+     * created only when first time used.
+     */
+    ExportFuncMap *export_func_maps;
     AOTFunctionInstance **functions;
     uint32 function_count;
 #if WASM_ENABLE_MULTI_MODULE != 0
     bh_list sub_module_inst_list_head;
     bh_list *sub_module_inst_list;
     WASMModuleInstanceCommon **import_func_module_insts;
+#endif
+
+#if WASM_ENABLE_SHARED_HEAP != 0
+    WASMSharedHeap *shared_heap;
 #endif
 } AOTModuleInstanceExtra;
 
@@ -326,6 +356,10 @@ typedef struct AOTModule {
     /* `.data` and `.text` sections merged into one large mmaped section */
     uint8 *merged_data_text_sections;
     uint32 merged_data_text_sections_size;
+
+#if WASM_ENABLE_AOT_STACK_FRAME != 0
+    uint32 feature_flags;
+#endif
 } AOTModule;
 
 #define AOTMemoryInstance WASMMemoryInstance
@@ -485,6 +519,18 @@ void
 aot_unload(AOTModule *module);
 
 /**
+ * Resolve symbols for an AOT module
+ */
+bool
+aot_resolve_symbols(AOTModule *module);
+
+/**
+ * Helper function to resolve a single function
+ */
+bool
+aot_resolve_import_func(AOTModule *module, AOTImportFunc *import_func);
+
+/**
  * Instantiate a AOT module.
  *
  * @param module the AOT module to instantiate
@@ -525,6 +571,22 @@ AOTFunctionInstance *
 aot_lookup_function(const AOTModuleInstance *module_inst, const char *name);
 
 /**
+ * Lookup an exported function in the AOT module instance with
+ * the function index.
+ */
+AOTFunctionInstance *
+aot_lookup_function_with_idx(AOTModuleInstance *module_inst, uint32 func_idx);
+
+AOTMemoryInstance *
+aot_lookup_memory(AOTModuleInstance *module_inst, char const *name);
+
+AOTMemoryInstance *
+aot_get_default_memory(AOTModuleInstance *module_inst);
+
+AOTMemoryInstance *
+aot_get_memory_with_idx(AOTModuleInstance *module_inst, uint32 mem_idx);
+
+/**
  * Get a function in the AOT module instance.
  *
  * @param module_inst the module instance
@@ -533,7 +595,7 @@ aot_lookup_function(const AOTModuleInstance *module_inst, const char *name);
  * @return the function instance found
  */
 AOTFunctionInstance *
-aot_get_function_instance(AOTModuleInstance *module_inst, uint32_t func_idx);
+aot_get_function_instance(AOTModuleInstance *module_inst, uint32 func_idx);
 
 /**
  * Call the given AOT function of a AOT module instance with
@@ -641,7 +703,7 @@ aot_check_app_addr_and_convert(AOTModuleInstance *module_inst, bool is_str,
                                void **p_native_addr);
 
 uint32
-aot_get_plt_table_size();
+aot_get_plt_table_size(void);
 
 void *
 aot_memmove(void *dest, const void *src, size_t n);

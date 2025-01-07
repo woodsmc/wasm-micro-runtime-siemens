@@ -16,6 +16,7 @@
 #include "aot_emit_parametric.h"
 #include "aot_emit_table.h"
 #include "aot_emit_gc.h"
+#include "aot_stack_frame_comp.h"
 #include "simd/simd_access_lanes.h"
 #include "simd/simd_bitmask_extracts.h"
 #include "simd/simd_bit_shifts.h"
@@ -145,9 +146,20 @@ aot_validate_wasm(AOTCompContext *comp_ctx)
     }
 
 #if WASM_ENABLE_MEMORY64 != 0
-    if (comp_ctx->pointer_size < sizeof(uint64) && IS_MEMORY64) {
-        aot_set_last_error("Compiling wasm64 to 32bit platform is not allowed");
-        return false;
+    if (comp_ctx->pointer_size < sizeof(uint64)) {
+        if (IS_MEMORY64) {
+            aot_set_last_error("Compiling wasm64(contains i64 memory section) "
+                               "to 32bit platform is not allowed");
+            return false;
+        }
+
+        for (uint32 i = 0; i < comp_ctx->comp_data->table_count; ++i) {
+            if (IS_TABLE64(i)) {
+                aot_set_last_error("Compiling wasm64(contains i64 table "
+                                   "section) to 32bit platform is not allowed");
+                return false;
+            }
+        }
     }
 #endif
 
@@ -251,6 +263,13 @@ store_value(AOTCompContext *comp_ctx, LLVMValueRef value, uint8 value_type,
     LLVMSetAlignment(res, 4);
 
     return true;
+}
+
+void
+aot_call_stack_features_init_default(AOTCallStackFeatures *features)
+{
+    memset(features, 1, sizeof(AOTCallStackFeatures));
+    features->frame_per_function = false;
 }
 
 bool
@@ -573,9 +592,10 @@ aot_gen_commit_values(AOTCompFrame *frame)
     return true;
 }
 
-bool
-aot_gen_commit_ip(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
-                  LLVMValueRef ip_value, bool is_64bit)
+static bool
+aot_standard_frame_gen_commit_ip(AOTCompContext *comp_ctx,
+                                 AOTFuncContext *func_ctx,
+                                 LLVMValueRef ip_value, bool is_64bit)
 {
     LLVMValueRef cur_frame = func_ctx->cur_frame;
     LLVMValueRef value_offset, value_addr, value_ptr;
@@ -611,6 +631,23 @@ aot_gen_commit_ip(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
     }
 
     return true;
+}
+
+bool
+aot_gen_commit_ip(AOTCompContext *comp_ctx, AOTFuncContext *func_ctx,
+                  LLVMValueRef ip_value, bool is_64bit)
+{
+    switch (comp_ctx->aux_stack_frame_type) {
+        case AOT_STACK_FRAME_TYPE_STANDARD:
+            return aot_standard_frame_gen_commit_ip(comp_ctx, func_ctx,
+                                                    ip_value, is_64bit);
+        case AOT_STACK_FRAME_TYPE_TINY:
+            return aot_tiny_frame_gen_commit_ip(comp_ctx, func_ctx, ip_value);
+        default:
+            aot_set_last_error(
+                "unsupported mode when generating commit_ip code");
+            return false;
+    }
 }
 
 bool
@@ -962,6 +999,7 @@ static bool
 aot_compile_func(AOTCompContext *comp_ctx, uint32 func_index)
 {
     AOTFuncContext *func_ctx = comp_ctx->func_ctxes[func_index];
+    LLVMValueRef func_index_ref;
     uint8 *frame_ip = func_ctx->aot_func->code, opcode, *p_f32, *p_f64;
     uint8 *frame_ip_end = frame_ip + func_ctx->aot_func->code_size;
     uint8 *param_types = NULL;
@@ -984,16 +1022,27 @@ aot_compile_func(AOTCompContext *comp_ctx, uint32 func_index)
     LLVMMetadataRef location;
 #endif
 
-    if (comp_ctx->enable_aux_stack_frame) {
+    /* Start to translate the opcodes */
+    LLVMPositionBuilderAtEnd(
+        comp_ctx->builder,
+        func_ctx->block_stack.block_list_head->llvm_entry_block);
+
+    if (comp_ctx->aux_stack_frame_type
+        && comp_ctx->call_stack_features.frame_per_function) {
+        INT_CONST(func_index_ref,
+                  func_index + comp_ctx->comp_data->import_func_count, I32_TYPE,
+                  true);
+        if (!aot_alloc_frame_per_function_frame_for_aot_func(comp_ctx, func_ctx,
+                                                             func_index_ref)) {
+            return false;
+        }
+    }
+    if (comp_ctx->aux_stack_frame_type) {
         if (!init_comp_frame(comp_ctx, func_ctx, func_index)) {
             return false;
         }
     }
 
-    /* Start to translate the opcodes */
-    LLVMPositionBuilderAtEnd(
-        comp_ctx->builder,
-        func_ctx->block_stack.block_list_head->llvm_entry_block);
     while (frame_ip < frame_ip_end) {
         opcode = *frame_ip++;
 
@@ -4044,39 +4093,6 @@ aot_compile_wasm(AOTCompContext *comp_ctx)
     return true;
 }
 
-#if !(defined(_WIN32) || defined(_WIN32_))
-char *
-aot_generate_tempfile_name(const char *prefix, const char *extension,
-                           char *buffer, uint32 len)
-{
-    int fd, name_len;
-
-    name_len = snprintf(buffer, len, "%s-XXXXXX", prefix);
-
-    if ((fd = mkstemp(buffer)) <= 0) {
-        aot_set_last_error("make temp file failed.");
-        return NULL;
-    }
-
-    /* close and remove temp file */
-    close(fd);
-    unlink(buffer);
-
-    /* Check if buffer length is enough */
-    /* name_len + '.' + extension + '\0' */
-    if (name_len + 1 + strlen(extension) + 1 > len) {
-        aot_set_last_error("temp file name too long.");
-        return NULL;
-    }
-
-    snprintf(buffer + name_len, len - name_len, ".%s", extension);
-    return buffer;
-}
-#else
-
-errno_t
-_mktemp_s(char *nameTemplate, size_t sizeInChars);
-
 char *
 aot_generate_tempfile_name(const char *prefix, const char *extension,
                            char *buffer, uint32 len)
@@ -4085,7 +4101,8 @@ aot_generate_tempfile_name(const char *prefix, const char *extension,
 
     name_len = snprintf(buffer, len, "%s-XXXXXX", prefix);
 
-    if (_mktemp_s(buffer, name_len + 1) != 0) {
+    if (!bh_mkstemp(buffer, name_len + 1)) {
+        aot_set_last_error("make temp file failed.");
         return NULL;
     }
 
@@ -4099,7 +4116,6 @@ aot_generate_tempfile_name(const char *prefix, const char *extension,
     snprintf(buffer + name_len, len - name_len, ".%s", extension);
     return buffer;
 }
-#endif /* end of !(defined(_WIN32) || defined(_WIN32_)) */
 
 bool
 aot_emit_llvm_file(AOTCompContext *comp_ctx, const char *file_name)
@@ -4178,7 +4194,6 @@ aot_emit_object_file(AOTCompContext *comp_ctx, char *file_name)
 
     bh_print_time("Begin to emit object file");
 
-#if !(defined(_WIN32) || defined(_WIN32_))
     if (comp_ctx->external_llc_compiler || comp_ctx->external_asm_compiler) {
         char cmd[1024];
         int ret;
@@ -4221,7 +4236,7 @@ aot_emit_object_file(AOTCompContext *comp_ctx, char *file_name)
                      file_name, bc_file_name);
             LOG_VERBOSE("invoking external LLC compiler:\n\t%s", cmd);
 
-            ret = system(cmd);
+            ret = bh_system(cmd);
             /* remove temp bitcode file */
             unlink(bc_file_name);
 
@@ -4274,7 +4289,7 @@ aot_emit_object_file(AOTCompContext *comp_ctx, char *file_name)
                      file_name, asm_file_name);
             LOG_VERBOSE("invoking external ASM compiler:\n\t%s", cmd);
 
-            ret = system(cmd);
+            ret = bh_system(cmd);
             /* remove temp assembly file */
             unlink(asm_file_name);
 
@@ -4287,7 +4302,6 @@ aot_emit_object_file(AOTCompContext *comp_ctx, char *file_name)
 
         return true;
     }
-#endif /* end of !(defined(_WIN32) || defined(_WIN32_)) */
 
     if (!strncmp(LLVMGetTargetName(target), "arc", 3))
         /* Emit to assembly file instead for arc target
