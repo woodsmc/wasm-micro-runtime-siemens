@@ -27,6 +27,11 @@ typedef struct WASMGlobalInstance WASMGlobalInstance;
 #if WASM_ENABLE_TAGS != 0
 typedef struct WASMTagInstance WASMTagInstance;
 #endif
+#if WASM_ENABLE_EXCE_HANDLING != 0 && WASM_ENABLE_TAGS != 0
+typedef struct WASMExceptionInstance WASMExceptionInstance;
+typedef uint32 WASMExceptionReference;
+#endif
+
 
 /**
  * When LLVM JIT, WAMR compiler or AOT is enabled, we should ensure that
@@ -91,15 +96,6 @@ typedef union {
     uint64 u64;
     uint32 u32[2];
 } MemBound;
-
-typedef struct WASMSharedHeap {
-    struct WASMSharedHeap *next;
-    void *heap_handle;
-    uint8 *base_addr;
-    uint64 size;
-    uint64 start_off_mem64;
-    uint64 start_off_mem32;
-} WASMSharedHeap;
 
 struct WASMMemoryInstance {
     /* Module type */
@@ -166,8 +162,7 @@ struct WASMMemoryInstance {
 struct WASMTableInstance {
     /* The element type */
     uint8 elem_type;
-    uint8 is_table64;
-    uint8 __padding__[6];
+    uint8 __padding__[7];
     union {
 #if WASM_ENABLE_GC != 0
         WASMRefType *elem_ref_type;
@@ -260,6 +255,25 @@ struct WASMTagInstance {
 #endif
 };
 #endif
+
+
+#if WASM_ENABLE_EXCE_HANDLING != 0 && WASM_ENABLE_TAGS != 0
+struct WASMExceptionInstance {
+    /* reference counter, for internal use */
+    uint32 refcount;
+    /* address of the thrown tag */
+    WASMTagInstance * tagaddress;
+    /* cells allocated in vals, for internal use */
+    uint32 cell_alloc;
+    /* cells actually pushed to the vals array 
+     * should be eiter zero or equal to tagaddress->type->param_cells_used 
+     */
+    uint32 cell_num;
+    /* stores actual values of the exception (tag params) */
+    uint32 * vals;
+};
+#endif
+
 
 #if WASM_ENABLE_EXCE_HANDLING != 0
 #define INVALID_TAGINDEX ((uint32)0xFFFFFFFF)
@@ -363,24 +377,17 @@ typedef struct WASMModuleInstanceExtra {
     uint32 max_aux_stack_used;
 #endif
 
-#if WASM_ENABLE_SHARED_HEAP != 0
-    WASMSharedHeap *shared_heap;
-#if WASM_ENABLE_JIT != 0
-    /*
-     * Adjusted shared heap based addr to simple the calculation
-     * in the aot code. The value is:
-     *   shared_heap->base_addr - shared_heap->start_off
-     */
-    uint8 *shared_heap_base_addr_adj;
-    MemBound shared_heap_start_off;
-#endif
-#endif
-
 #if WASM_ENABLE_DEBUG_INTERP != 0                         \
     || (WASM_ENABLE_FAST_JIT != 0 && WASM_ENABLE_JIT != 0 \
         && WASM_ENABLE_LAZY_JIT != 0)
     WASMModuleInstance *next;
 #endif
+
+#if WASM_ENABLE_EXCE_HANDLING != 0 && WASM_ENABLE_TAGS != 0
+    uint32 exns_count;
+    WASMExceptionInstance ** exns;
+#endif
+
 } WASMModuleInstanceExtra;
 
 struct AOTFuncPerfProfInfo;
@@ -453,8 +460,19 @@ struct WASMModuleInstance {
 
     /* Default WASM operand stack size */
     uint32 default_wasm_stack_size;
+#if WASM_ENABLE_RETVALTYPE == 1
+    /* accoring to the spec, a returned value type can be */
+    /* either a value (i??,f??,v128) or trap, refs or exception */ 
+    /* this workaround proposal allows the caller or embedder to */
+    /* distinguish the result and decide, if it is a "non-value" */
+    /* to not break the API, traps, exceptions and refs are all treated */
+    /* as "trap" with an string in the module_inst->cur_exception */
+    /* (see wasm_set_exception and wasm_get_exception) in wasm_runtime_common */
+    uint32 returned_value_type;
+    uint32 reserved[6];
+#else
     uint32 reserved[7];
-
+#endif
     /*
      * +------------------------------+ <-- memories
      * | WASMMemoryInstance[mem_count], mem_count is always 1 for LLVM JIT/AOT
@@ -536,13 +554,6 @@ wasm_load_from_sections(WASMSection *section_list, char *error_buf,
 void
 wasm_unload(WASMModule *module);
 
-bool
-wasm_resolve_symbols(WASMModule *module);
-
-bool
-wasm_resolve_import_func(const WASMModule *module,
-                         WASMFunctionImport *function);
-
 WASMModuleInstance *
 wasm_instantiate(WASMModule *module, WASMModuleInstance *parent,
                  WASMExecEnv *exec_env_main, uint32 stack_size,
@@ -569,12 +580,12 @@ wasm_set_running_mode(WASMModuleInstance *module_inst,
 WASMFunctionInstance *
 wasm_lookup_function(const WASMModuleInstance *module_inst, const char *name);
 
-WASMMemoryInstance *
-wasm_lookup_memory(const WASMModuleInstance *module_inst, const char *name);
-
 #if WASM_ENABLE_MULTI_MODULE != 0
 WASMGlobalInstance *
 wasm_lookup_global(const WASMModuleInstance *module_inst, const char *name);
+
+WASMMemoryInstance *
+wasm_lookup_memory(const WASMModuleInstance *module_inst, const char *name);
 
 WASMTableInstance *
 wasm_lookup_table(const WASMModuleInstance *module_inst, const char *name);
@@ -584,7 +595,16 @@ WASMTagInstance *
 wasm_lookup_tag(const WASMModuleInstance *module_inst, const char *name,
                 const char *signature);
 #endif
+#endif
+#if WASM_ENABLE_EXCE_HANDLING != 0 && WASM_ENABLE_TAGS != 0
+WASMExceptionInstance * 
+get_exn_inst(WASMModuleInstance *module_inst, WASMExceptionReference exnref);
 
+void
+free_exn_inst(WASMModuleInstance *module_inst, const WASMExceptionReference exn);
+
+WASMExceptionReference
+allocate_exn_inst(WASMModuleInstance *module_inst, WASMTagInstance * ti);
 #endif
 
 bool
@@ -608,6 +628,31 @@ wasm_get_exception(WASMModuleInstance *module);
  */
 bool
 wasm_copy_exception(WASMModuleInstance *module_inst, char *exception_buf);
+
+#if WASM_ENABLE_RETVALTYPE == 1
+#if WASM_ENABLE_EXCE_HANDLING != 0 && WASM_ENABLE_TAGS != 0
+
+/* similar to wasm_set_exception, wasm_set_exnref is meant to create an
+ * trap "uncaught exception" but marks the traps returnvalue to be of type
+ * EXNREF. the caller can find out about the situation by calling the
+ * function "wasm_get_retvaltype()" or the various 
+ */
+void
+wasm_set_exnref(WASMModuleInstance *module_inst, WASMExceptionReference exnref);
+#endif // WASM_ENABLE_EXCE_HANDLING != 0 && WASM_ENABLE_TAGS != 0
+
+/* get detailed info about the returned wamr-exception 
+ * distict, if an exception is 
+ * - a value, caller stack contains the result
+ * - a trap, wasm_copy_exception() to get the exeption string
+ * - a exnref, caller stack contains an exception reference
+ * - a externref, (not implemented)
+ * ... might be extended
+ */
+uint32
+wasm_exception_getretvaltype(WASMModuleInstanceCommon *module_inst_comm);
+
+#endif
 
 uint64
 wasm_module_malloc_internal(WASMModuleInstance *module_inst,
