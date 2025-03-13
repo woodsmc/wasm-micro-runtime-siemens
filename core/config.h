@@ -193,6 +193,10 @@
 #error "Heap aux stack allocation must be enabled for WASI threads"
 #endif
 
+#ifndef WAMR_ENABLE_COPY_CALLSTACK
+#define WAMR_ENABLE_COPY_CALLSTACK 0
+#endif
+
 #ifndef WASM_ENABLE_BASE_LIB
 #define WASM_ENABLE_BASE_LIB 0
 #endif
@@ -696,6 +700,14 @@
 
 #ifndef WASM_ENABLE_SHARED_HEAP
 #define WASM_ENABLE_SHARED_HEAP 0
+#endif
+
+#ifndef WASM_ENABLE_SHRUNK_MEMORY
+#define WASM_ENABLE_SHRUNK_MEMORY 1
+#endif
+
+#ifndef WASM_ENABLE_AOT_VALIDATOR
+#define WASM_ENABLE_AOT_VALIDATOR 0
 #endif
 
 #endif /* end of _CONFIG_H_ */

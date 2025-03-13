@@ -1790,7 +1790,9 @@ aot_emit_mem_info(uint8 *buf, uint8 *buf_end, uint32 *p_offset,
                                 &init_datas[i]->offset))
             return false;
         EMIT_U32(init_datas[i]->byte_count);
-        EMIT_BUF(init_datas[i]->bytes, init_datas[i]->byte_count);
+        if (init_datas[i]->byte_count) {
+            EMIT_BUF(init_datas[i]->bytes, init_datas[i]->byte_count);
+        }
     }
 
     if (offset - *p_offset != get_mem_info_size(comp_ctx, comp_data)) {
@@ -3844,7 +3846,7 @@ aot_resolve_object_relocation_group(AOTObjectData *obj_data,
         }
     }
 
-    /* pares each relocation */
+    /* parse each relocation */
     if (!(rel_itr = LLVMGetRelocations(rel_sec))) {
         aot_set_last_error("llvm get relocations failed.");
         return false;

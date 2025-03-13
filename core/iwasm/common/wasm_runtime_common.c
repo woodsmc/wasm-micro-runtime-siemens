@@ -757,7 +757,10 @@ wasm_runtime_full_init_internal(RuntimeInitArgs *init_args)
 #endif
 
 #if WASM_ENABLE_GC != 0
-    gc_heap_size_default = init_args->gc_heap_size;
+    uint32 gc_heap_size = init_args->gc_heap_size;
+    if (gc_heap_size > 0) {
+        gc_heap_size_default = gc_heap_size;
+    }
 #endif
 
 #if WASM_ENABLE_JIT != 0
@@ -1739,6 +1742,45 @@ wasm_runtime_destroy_exec_env(WASMExecEnv *exec_env)
 {
     wasm_exec_env_destroy(exec_env);
 }
+
+#if WAMR_ENABLE_COPY_CALLSTACK != 0
+uint32
+wasm_copy_callstack(const wasm_exec_env_t exec_env, wasm_frame_t *buffer,
+                    const uint32 length, const uint32 skip_n, char *error_buf,
+                    uint32_t error_buf_size)
+{
+    /*
+     * Note for devs: please refrain from such modifications inside of
+     * wasm_copy_callstack to preserve async-signal-safety
+     * - any allocations/freeing memory
+     * - dereferencing any pointers other than: exec_env, exec_env->module_inst,
+     * exec_env->module_inst->module, pointers between stack's bottom and
+     * top_boundary For more details check wasm_copy_callstack in
+     * wasm_export.h
+     */
+#if WASM_ENABLE_DUMP_CALL_STACK
+    WASMModuleInstance *module_inst =
+        (WASMModuleInstance *)get_module_inst(exec_env);
+
+#if WASM_ENABLE_INTERP != 0
+    if (module_inst->module_type == Wasm_Module_Bytecode) {
+        return wasm_interp_copy_callstack(exec_env, buffer, length, skip_n,
+                                          error_buf, error_buf_size);
+    }
+#endif
+
+#if WASM_ENABLE_AOT != 0
+    if (module_inst->module_type == Wasm_Module_AoT) {
+        return aot_copy_callstack(exec_env, buffer, length, skip_n, error_buf,
+                                  error_buf_size);
+    }
+#endif
+#endif
+    char *err_msg = "No copy_callstack API was actually executed";
+    strncpy(error_buf, err_msg, error_buf_size);
+    return 0;
+}
+#endif // WAMR_ENABLE_COPY_CALLSTACK
 
 bool
 wasm_runtime_init_thread_env(void)
@@ -3014,9 +3056,9 @@ static const char *exception_msgs[] = {
     "wasm operand stack overflow",    /* EXCE_OPERAND_STACK_OVERFLOW */
     "failed to compile fast jit function", /* EXCE_FAILED_TO_COMPILE_FAST_JIT_FUNC */
     /* GC related exceptions */
-    "null function object",           /* EXCE_NULL_FUNC_OBJ */
-    "null structure object",          /* EXCE_NULL_STRUCT_OBJ */
-    "null array reference",              /* EXCE_NULL_ARRAY_OBJ */
+    "null function reference",        /* EXCE_NULL_FUNC_OBJ */
+    "null structure reference",       /* EXCE_NULL_STRUCT_OBJ */
+    "null array reference",           /* EXCE_NULL_ARRAY_OBJ */
     "null i31 reference",             /* EXCE_NULL_I31_OBJ */
     "null reference",                 /* EXCE_NULL_REFERENCE */
     "create rtt type failed",         /* EXCE_FAILED_TO_CREATE_RTT_TYPE */
@@ -3024,7 +3066,7 @@ static const char *exception_msgs[] = {
     "create array object failed",     /* EXCE_FAILED_TO_CREATE_ARRAY_OBJ */
     "create externref object failed", /* EXCE_FAILED_TO_CREATE_EXTERNREF_OBJ */
     "cast failure",                   /* EXCE_CAST_FAILURE */
-    "out of bounds array access",      /* EXCE_ARRAY_IDX_OOB */
+    "out of bounds array access",     /* EXCE_ARRAY_IDX_OOB */
     /* stringref related exceptions */
     "create string object failed",    /* EXCE_FAILED_TO_CREATE_STRING */
     "create stringref failed",        /* EXCE_FAILED_TO_CREATE_STRINGREF */
@@ -4458,8 +4500,9 @@ wasm_func_type_get_param_valkind(WASMFuncType *const func_type,
             return WASM_V128;
         case VALUE_TYPE_FUNCREF:
             return WASM_FUNCREF;
-
         case VALUE_TYPE_EXTERNREF:
+            return WASM_EXTERNREF;
+
         case VALUE_TYPE_VOID:
         default:
         {
